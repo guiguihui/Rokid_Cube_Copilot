@@ -1,0 +1,11 @@
+{
+  "name": "cube-coach",
+  "version": "0.1.0",
+  "description": "魔方还原助手 — 面向新手的 AIUI 魔方还原教练",
+  "main": "app.js",
+  "scripts": {
+    "start": "jsui start",
+    "dev": "jsui start --debug"
+  },
+  "dependencies": {}
+}

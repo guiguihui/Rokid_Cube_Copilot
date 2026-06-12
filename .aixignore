@@ -1,0 +1,6 @@
+.DS_Store
+.claude/
+AIUI/
+aiui-kb/
+docs/
+node_modules/

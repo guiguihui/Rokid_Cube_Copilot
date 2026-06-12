@@ -1,0 +1,10 @@
+# 测试图片，不提交
+testImg/
+
+# jsar-project/AIUI 的本地克隆（参考用，自带 .git，需要时自行 clone）
+AIUI/
+
+# 本地个人配置
+.claude/settings.local.json
+
+node_modules/

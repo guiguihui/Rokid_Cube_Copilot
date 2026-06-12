@@ -1,0 +1,10 @@
+{
+  "pages": [
+    "pages/input/index",
+    "pages/scan/index",
+    "pages/guide/index"
+  ],
+  "window": {
+    "navigationBarTitleText": "魔方还原助手"
+  }
+}
