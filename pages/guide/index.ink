@@ -10,6 +10,7 @@ import { parseMoves, stepText } from '../../lib/moves.js';
 
 const GREEN = '#40ff5e';
 const DIM = 'rgba(64, 255, 94, 0.6)';
+const SLIDE_COOLDOWN = 250; // 真机滑动太灵敏：冷却时间内的重复滑动只算一次
 
 export default {
   data: {
@@ -83,10 +84,10 @@ export default {
     ctx.strokeStyle = GREEN;
     ctx.strokeRect(cx - 38, cy - 38, 76, 76);
 
-    // 面字母
+    // 面（中文单字：顶/底/前/后/左/右）
     ctx.font = '44px Arial';
     ctx.textBaseline = 'middle';
-    ctx.fillText(s.face, cx, cy + 2);
+    ctx.fillText((s.name && s.name[0]) || s.face, cx, cy + 2);
     ctx.textBaseline = 'alphabetic';
 
     // 旋转箭头
@@ -208,10 +209,19 @@ export default {
     if (!event) return;
     const code = event.code;
     this.setData({ lastKey: code || '' });
+    const isSlide = code === 'ArrowRight' || code === 'ArrowDown' || code === 'ArrowLeft' || code === 'ArrowUp';
+    if (isSlide && this.throttleSlide()) return; // 滑动节流：一次滑动只走一步
     // 线性：向前/单击=下一步，向后=上一步
     if (code === 'Enter' || code === 'Space' || code === 'NumpadEnter' || code === 'ArrowRight' || code === 'ArrowDown') this.next();
     else if (code === 'ArrowLeft' || code === 'ArrowUp') this.prev();
     else if (code === 'Backspace') wx.navigateBack();
+  },
+
+  throttleSlide() {
+    const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    if (now - (this._lastSlide || 0) < SLIDE_COOLDOWN) return true;
+    this._lastSlide = now;
+    return false;
   },
 };
 </script>

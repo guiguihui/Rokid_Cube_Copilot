@@ -8,3 +8,10 @@ AIUI/
 .claude/settings.local.json
 
 node_modules/
+
+# adb 截屏临时文件
+_shot.png
+
+# CV 原型可视化临时图 + 临时分析脚本
+tools/_*.png
+tools/_*.mjs

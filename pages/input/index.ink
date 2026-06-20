@@ -6,13 +6,14 @@
 
 <script setup>
 import wx from 'wx';
-import { solvedGrid, validate, nextColor } from '../../lib/cube.js';
-import { solve, scrambledGrid } from '../../lib/solver.js';
+import { solvedGrid, validate, nextColor, COLOR_NAME_CN } from '../../lib/cube.js';
+import { solve, scrambledGrid, warmup, isWarmed } from '../../lib/solver.js';
 
 // 硬件只有：向前 / 向后 / 单击 / 双击 -> 单轴线性环形导航
 // 焦点序列：0..3 = 4 个按钮；4..57 = 54 个色块(U R F D L B 各 9)
 // 环形(到尾绕回头)保证每个按钮/色块都能逐个遍历到、不遗漏
-const VERSION = '1.0.11';
+const VERSION = '1.0.28';
+const SLIDE_COOLDOWN = 250; // 真机滑动太灵敏：两次滑动间隔小于此(ms)视为同一次，避免一滑跳多格
 const BTNS = ['scan', 'scramble', 'reset', 'solve'];
 const BTN_LABEL = { scan: '扫描魔方', scramble: '载入测试打乱', reset: '重置', solve: '求解' };
 const FACE_ORDER = ['U', 'R', 'F', 'D', 'L', 'B']; // 两行各三面：U R F / D L B
@@ -29,6 +30,7 @@ export default {
     hint: '向前/向后 选择，单击 确认/切换颜色（环形遍历，可改任意色块）。',
     lastKey: '',
     version: VERSION,
+    warming: false,
   },
 
   onLoad() {
@@ -36,6 +38,18 @@ export default {
     this.focusIndex = 0;
     this.render();
     this.applyScannedGrid();
+    this.scheduleWarmup();
+  },
+
+  // 首屏画完后延迟预热求解器：建表卡顿挪到用户看首页/扫描时，之后求解秒出
+  scheduleWarmup() {
+    if (this._warmScheduled || isWarmed()) return;
+    this._warmScheduled = true;
+    this.setData({ warming: true });
+    setTimeout(() => {
+      warmup();
+      this.setData({ warming: false });
+    }, 300);
   },
 
   onShow() {
@@ -49,6 +63,7 @@ export default {
       cells[f] = this.grid[f].map((color, i) => ({
         i,
         color,
+        label: COLOR_NAME_CN[color] || color,
         locked: i === 4,
         foc: CELL_BASE + fo * 9 + i === this.focusIndex,
       }));
@@ -87,7 +102,7 @@ export default {
   loadScramble() {
     this.grid = scrambledGrid();
     this.focusIndex = 3;
-    this.setData({ status: 'idle', errorText: '', hint: '已载入测试打乱，单击「求解」。' });
+    this.setData({ status: 'idle', errorText: '', hint: '已载入测试打乱（再点「载入测试打乱」可换下一个，共 6 个），单击「求解」。' });
     this.render();
   },
 
@@ -105,16 +120,20 @@ export default {
       return;
     }
     this.setData({ status: 'solving', errorText: '' });
-    try {
-      const moves = solve(this.grid);
-      if (!moves || !moves.trim()) throw new Error('empty solution');
-      wx.setStorageSync('cube.moves', moves);
-      this.setData({ status: 'idle' });
-      wx.navigateTo({ url: '/pages/guide/index' });
-    } catch (err) {
-      console.error('[input] solve failed:', err && (err.message || err));
-      this.setData({ status: 'error', errorText: '六色数量各9，但此状态无法还原（多半是某些色块识别错位/朝向不符），请逐格核对修正后重试。' });
-    }
+    // 推迟一帧再求解：让「求解中…」先画出来。min2phase 首次求解要建剪枝表(~1-4s 同步)，
+    // 若直接同步调用，提示来不及刷新、看起来像卡死。
+    setTimeout(() => {
+      try {
+        const moves = solve(this.grid);
+        if (!moves || !moves.trim()) throw new Error('empty solution');
+        wx.setStorageSync('cube.moves', moves);
+        this.setData({ status: 'idle' });
+        wx.navigateTo({ url: '/pages/guide/index' });
+      } catch (err) {
+        console.error('[input] solve failed:', err && (err.message || err));
+        this.setData({ status: 'error', errorText: '六色数量各9，但此状态无法还原（多半是某些色块识别错位/朝向不符），请逐格核对修正后重试。' });
+      }
+    }, 60);
   },
 
   applyScannedGrid() {
@@ -139,10 +158,20 @@ export default {
   onKeyDown(event) {
     const code = event && event.code;
     this.setData({ lastKey: code || '' });
+    const isSlide = code === 'ArrowDown' || code === 'ArrowRight' || code === 'ArrowUp' || code === 'ArrowLeft';
+    if (isSlide && this.throttleSlide()) return; // 滑动节流：一次滑动只走一格
     if (code === 'ArrowDown' || code === 'ArrowRight') this.focusNext();
     else if (code === 'ArrowUp' || code === 'ArrowLeft') this.focusPrev();
     else if (code === 'Enter' || code === 'Space' || code === 'NumpadEnter') this.activate();
     else if (code === 'Backspace') wx.exitMiniProgram();
+  },
+
+  // 真机滑动灵敏度高，一次物理滑动会连发多个方向事件；用冷却时间把它收敛成一格
+  throttleSlide() {
+    const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    if (now - (this._lastSlide || 0) < SLIDE_COOLDOWN) return true;
+    this._lastSlide = now;
+    return false;
   },
 
   onBtnTap(e) {
@@ -168,32 +197,33 @@ export default {
 
     <text class="hint">{{ hint }}</text>
     <text class="err" ink:if="{{ status === 'error' }}">{{ errorText }}</text>
-    <text class="solving" ink:if="{{ status === 'solving' }}">求解中…</text>
+    <text class="solving" ink:if="{{ status === 'solving' }}">⏳ 求解中…（首次需初始化求解器，请稍候 1–4 秒）</text>
+    <text class="warming" ink:if="{{ warming }}">⏳ 求解器初始化中，稍候即可秒解…</text>
 
     <view class="cube">
       <view class="face">
-        <text class="flabel">顶 U</text>
-        <view class="g3"><view class="cell {{item.locked?'lock':''}} {{item.foc?'foc':''}}" ink:for="{{cells.U}}" ink:key="i" data-face="U" data-i="{{item.i}}" bindtap="onCellTap"><text>{{ item.color }}</text></view></view>
+        <text class="flabel">顶面</text>
+        <view class="g3"><view class="cell {{item.locked?'lock':''}} {{item.foc?'foc':''}}" ink:for="{{cells.U}}" ink:key="i" data-face="U" data-i="{{item.i}}" bindtap="onCellTap"><text>{{ item.label }}</text></view></view>
       </view>
       <view class="face">
-        <text class="flabel">右 R</text>
-        <view class="g3"><view class="cell {{item.locked?'lock':''}} {{item.foc?'foc':''}}" ink:for="{{cells.R}}" ink:key="i" data-face="R" data-i="{{item.i}}" bindtap="onCellTap"><text>{{ item.color }}</text></view></view>
+        <text class="flabel">右面</text>
+        <view class="g3"><view class="cell {{item.locked?'lock':''}} {{item.foc?'foc':''}}" ink:for="{{cells.R}}" ink:key="i" data-face="R" data-i="{{item.i}}" bindtap="onCellTap"><text>{{ item.label }}</text></view></view>
       </view>
       <view class="face">
-        <text class="flabel">前 F</text>
-        <view class="g3"><view class="cell {{item.locked?'lock':''}} {{item.foc?'foc':''}}" ink:for="{{cells.F}}" ink:key="i" data-face="F" data-i="{{item.i}}" bindtap="onCellTap"><text>{{ item.color }}</text></view></view>
+        <text class="flabel">前面</text>
+        <view class="g3"><view class="cell {{item.locked?'lock':''}} {{item.foc?'foc':''}}" ink:for="{{cells.F}}" ink:key="i" data-face="F" data-i="{{item.i}}" bindtap="onCellTap"><text>{{ item.label }}</text></view></view>
       </view>
       <view class="face">
-        <text class="flabel">底 D</text>
-        <view class="g3"><view class="cell {{item.locked?'lock':''}} {{item.foc?'foc':''}}" ink:for="{{cells.D}}" ink:key="i" data-face="D" data-i="{{item.i}}" bindtap="onCellTap"><text>{{ item.color }}</text></view></view>
+        <text class="flabel">底面</text>
+        <view class="g3"><view class="cell {{item.locked?'lock':''}} {{item.foc?'foc':''}}" ink:for="{{cells.D}}" ink:key="i" data-face="D" data-i="{{item.i}}" bindtap="onCellTap"><text>{{ item.label }}</text></view></view>
       </view>
       <view class="face">
-        <text class="flabel">左 L</text>
-        <view class="g3"><view class="cell {{item.locked?'lock':''}} {{item.foc?'foc':''}}" ink:for="{{cells.L}}" ink:key="i" data-face="L" data-i="{{item.i}}" bindtap="onCellTap"><text>{{ item.color }}</text></view></view>
+        <text class="flabel">左面</text>
+        <view class="g3"><view class="cell {{item.locked?'lock':''}} {{item.foc?'foc':''}}" ink:for="{{cells.L}}" ink:key="i" data-face="L" data-i="{{item.i}}" bindtap="onCellTap"><text>{{ item.label }}</text></view></view>
       </view>
       <view class="face">
-        <text class="flabel">后 B</text>
-        <view class="g3"><view class="cell {{item.locked?'lock':''}} {{item.foc?'foc':''}}" ink:for="{{cells.B}}" ink:key="i" data-face="B" data-i="{{item.i}}" bindtap="onCellTap"><text>{{ item.color }}</text></view></view>
+        <text class="flabel">后面</text>
+        <view class="g3"><view class="cell {{item.locked?'lock':''}} {{item.foc?'foc':''}}" ink:for="{{cells.B}}" ink:key="i" data-face="B" data-i="{{item.i}}" bindtap="onCellTap"><text>{{ item.label }}</text></view></view>
       </view>
     </view>
 
@@ -229,6 +259,7 @@ export default {
 .hint { font-size: 11px; color: rgba(64, 255, 94, 0.6); text-align: center; }
 .err { font-size: 13px; color: #ffd6e7; text-align: center; }
 .solving { font-size: 13px; color: #40ff5e; }
+.warming { font-size: 11px; color: rgba(64, 255, 94, 0.7); text-align: center; }
 .cube {
   display: flex;
   flex-direction: row;

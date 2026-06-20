@@ -9,11 +9,12 @@ import wx from 'wx';
 import { decodeWebP } from '../../lib/webp.js';
 import { decodePng, isPng } from '../../lib/png.js';
 import { decodeJpeg, isJpeg } from '../../lib/jpeg.js';
-import { sampleFace } from '../../lib/colors.js';
-import { FACE_TO_COLOR, FACE_NAME_CN, nextColor } from '../../lib/cube.js';
+import { sampleFace, downsample, classifyByAnchorsHue, regionPx, locateFace } from '../../lib/colors.js';
+import { FACE_TO_COLOR, FACE_NAME_CN, COLOR_NAME_CN, nextColor } from '../../lib/cube.js';
 import { loadTestFrame } from '../../lib/testImages.js';
 
 const FACES = ['U', 'R', 'F', 'D', 'L', 'B'];
+const SLIDE_COOLDOWN = 250; // 真机滑动太灵敏：冷却时间内的重复滑动只算一次
 const HOLD = {
   U: '白色面朝上，俯视拍',
   R: '红色面对镜头',
@@ -50,22 +51,40 @@ export default {
     guideCells: emptyGuide(),
     actions: [],
     lastKey: '',
+    inReview: false,
+    camReady: false,
   },
 
   onLoad() {
-    this.detected = {};
+    this.detectedCells = {}; // 每面 9 格的 {r,g,b,color,manual}，finalize 时按锚色统一识别
     this.lastCells = null;
     this.mode = 'aim';
     this.focusIndex = 0;
     this.refreshFace();
   },
 
-  onShow() {
+  onReady() {
+    // 最佳实践：相机视图就绪(onReady)后再创建 context；预览由 <camera> 元素自动渲染
     this.cam = wx.media.createCameraContext();
+    this._camInitAt = 0;
+  },
+
+  onShow() {
+    if (!this.cam) this.cam = wx.media.createCameraContext();
   },
 
   onHide() {
     this.cam = null;
+    this.setData({ camReady: false });
+  },
+
+  // 相机初始化完成(bindinitdone)：标记就绪 + 记录时间(用于预热门控)
+  onCamReady(e) {
+    this._camInitAt = this._now();
+    this.setData({ camReady: true, statusText: this.data.statusText });
+  },
+  onCamError(e) {
+    this.setData({ camReady: false, errorText: '相机不可用(权限/初始化失败)' });
   },
 
   // 当前模式下可选项列表
@@ -80,7 +99,7 @@ export default {
     const inReview = this.mode === 'review';
     let guideCells;
     if (inReview && this.lastCells) {
-      guideCells = this.lastCells.map((c, idx) => ({ i: c.i, letter: c.color, foc: this.focusIndex === idx }));
+      guideCells = this.lastCells.map((c, idx) => ({ i: c.i, letter: COLOR_NAME_CN[c.color] || c.color, foc: this.focusIndex === idx }));
     } else {
       guideCells = emptyGuide();
     }
@@ -98,18 +117,46 @@ export default {
         foc: items[this.focusIndex] === id,
       }));
     }
-    this.setData({ guideCells, actions });
+    this.setData({ guideCells, actions, inReview });
+  },
+
+  // 复核：裁剪到「采样框 + 周围 25% 一圈」放大到 240×240。
+  // 取 margin=0.25×框边 → 框正好落在画布中央 2/3（与 .guide 绿网格对齐）。
+  drawReview() {
+    if (!this.lastFrame) return;
+    const ctx = wx.createCanvasContext('review');
+    if (!ctx) return;
+    const { rgba, width, height } = this.lastFrame;
+    const box = this.lastLoc || regionPx(width, height);
+    const m = Math.round(box.side * 0.25);
+    let cs = box.side + 2 * m;
+    let cx0 = box.x0 - m, cy0 = box.y0 - m;
+    cs = Math.min(cs, width, height);
+    cx0 = Math.max(0, Math.min(width - cs, cx0));
+    cy0 = Math.max(0, Math.min(height - cs, cy0));
+    const region = { x0: cx0, y0: cy0, sw: cs, sh: cs };
+    const N = 72, B = 240 / N;
+    const ds = downsample(rgba, width, height, N, region);
+    for (let row = 0; row < N; row++) {
+      for (let col = 0; col < N; col++) {
+        const c = ds.cells[row * N + col];
+        ctx.fillStyle = 'rgb(' + c.r + ',' + c.g + ',' + c.b + ')';
+        ctx.fillRect(col * B, row * B, B + 1, B + 1);
+      }
+    }
+    if (ctx.flush) ctx.flush();
   },
 
   refreshFace() {
     this.mode = 'aim';
     this.focusIndex = 0;
     this.lastCells = null;
+    this.lastFrame = null;
     const f = FACES[this.data.faceIdx];
     this.setData({
       faceName: FACE_NAME_CN[f],
       holdHint: HOLD[f],
-      statusText: `第 ${this.data.faceIdx + 1}/6 面：把这一面对齐填满九宫格 →「拍照」(或「测试图片」)`,
+      statusText: `第 ${this.data.faceIdx + 1}/6 面：举魔方对镜头 →「拍照」`,
       debug: '',
       errorText: '',
     });
@@ -123,17 +170,25 @@ export default {
     try {
       const photo = await source();
       const { width, height, rgba } = await decodeFrame(photo);
-      const { cells } = sampleFace(rgba, width, height);
+      const loc = locateFace(rgba, width, height, { yMin: 0.40 }); // 自动检测魔方面(避开上方屏幕)
+      const region = loc ? { x0: loc.x0, y0: loc.y0, side: loc.side } : regionPx(width, height);
+      const { cells } = sampleFace(rgba, width, height, null, region);
       this.lastCells = cells;
+      this.lastFrame = { rgba, width, height };
+      this.lastRegion = region;
+      this.lastLoc = loc;
       this.mode = 'review';
+      this._reviewLockUntil = this._now() + 1500; // 复核锁：拍照后 1.5s 内忽略"接受/改色"，防单次确认连带跳过复核
       this.focusIndex = 9; // 默认焦点在「接受本面」
       const c = cells[4];
+      console.log('[scan] loc=' + JSON.stringify(loc) + ' center=' + c.r + ',' + c.g + ',' + c.b);
       this.setData({
-        debug: `${photo.mimeType || 'img'} ${width}x${height} · 中心RGB(${c.r},${c.g},${c.b})`,
-        statusText: '向前/向后选格，单击改色；选「接受本面」进入下一面',
+        debug: '',
+        statusText: '看框有没有套住魔方',
         errorText: '',
       });
       this.render();
+      setTimeout(() => this.drawReview(), 80); // 等画布渲染出来再画缩略图
     } catch (e) {
       this.mode = 'aim';
       console.error('[scan] capture failed:', e && (e.message || e));
@@ -157,13 +212,14 @@ export default {
   cycleCell(i) {
     if (!this.lastCells) return;
     this.lastCells[i].color = nextColor(this.lastCells[i].color);
+    this.lastCells[i].manual = true; // 手动改过的格子，finalize 时不被锚色覆盖
     this.render();
   },
 
   acceptNext() {
     if (this.mode !== 'review' || !this.lastCells) return;
     const f = FACES[this.data.faceIdx];
-    this.detected[f] = this.lastCells.map((c) => c.color);
+    this.detectedCells[f] = this.lastCells.map((c) => ({ r: c.r, g: c.g, b: c.b, color: c.color, manual: !!c.manual }));
     if (this.data.faceIdx < 5) {
       this.setData({ faceIdx: this.data.faceIdx + 1 });
       this.refreshFace();
@@ -180,11 +236,23 @@ export default {
   },
 
   finalize() {
+    // 相对识别：6 个中心块作锚色，非中心非手动格按最近锚色统一归类
+    const anchors = [];
+    for (const f of FACES) {
+      const c = this.detectedCells[f] && this.detectedCells[f][4];
+      if (c) anchors.push({ color: FACE_TO_COLOR[f], r: c.r, g: c.g, b: c.b });
+    }
+    const useAnchors = anchors.length === 6;
     const grid = {};
     for (const f of FACES) {
-      const arr = (this.detected[f] || []).slice();
-      while (arr.length < 9) arr.push('');
-      arr[4] = FACE_TO_COLOR[f];
+      const cells = this.detectedCells[f] || [];
+      const arr = [];
+      for (let i = 0; i < 9; i++) {
+        if (i === 4) { arr.push(FACE_TO_COLOR[f]); continue; } // 中心强制身份色
+        const c = cells[i];
+        if (!c) { arr.push(''); continue; }
+        arr.push(c.manual || !useAnchors ? c.color : classifyByAnchorsHue(c, anchors));
+      }
       grid[f] = arr;
     }
     try {
@@ -196,9 +264,14 @@ export default {
     wx.navigateBack();
   },
 
+  _now() {
+    return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+  },
+
   activate() {
     const item = this.items()[this.focusIndex];
     if (this.mode === 'review') {
+      if (this._now() < (this._reviewLockUntil || 0)) return; // 复核锁未到期：忽略本次确认（防拍照同一确认连带接受）
       if (typeof item === 'number') this.cycleCell(item);
       else if (item === 'accept') this.acceptNext();
       else if (item === 'retake') this.refreshFace();
@@ -224,10 +297,19 @@ export default {
     const code = event && event.code;
     this.setData({ lastKey: code || '' });
     if (this.mode === 'busy') return;
+    const isSlide = code === 'ArrowDown' || code === 'ArrowRight' || code === 'ArrowUp' || code === 'ArrowLeft';
+    if (isSlide && this.throttleSlide()) return; // 滑动节流：一次滑动只走一格
     if (code === 'ArrowDown' || code === 'ArrowRight') this.focusNext();
     else if (code === 'ArrowUp' || code === 'ArrowLeft') this.focusPrev();
     else if (code === 'Enter' || code === 'Space' || code === 'NumpadEnter') this.activate();
     else if (code === 'Backspace') wx.navigateBack();
+  },
+
+  throttleSlide() {
+    const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    if (now - (this._lastSlide || 0) < SLIDE_COOLDOWN) return true;
+    this._lastSlide = now;
+    return false;
   },
 
   onActionTap(e) {
@@ -252,11 +334,13 @@ export default {
     </view>
 
     <view class="wrap">
-      <camera class="cam"></camera>
+      <camera class="cam" mode="normal" resolution="high" ink:if="{{ !inReview }}" bindinitdone="onCamReady" binderror="onCamError" bindstop="onCamError"></camera>
+      <canvas id="review" class="cam" width="240" height="240" ink:if="{{ inReview }}"></canvas>
       <view class="guide">
         <view class="gcell {{item.foc?'foc':''}}" ink:for="{{guideCells}}" ink:key="i" data-i="{{item.i}}" bindtap="onCellTap"><text>{{ item.letter }}</text></view>
       </view>
     </view>
+    <text class="camhint" ink:if="{{ !inReview }}">拍照后这里显示「框+周围」放大图，核对框有没有套住魔方</text>
 
     <view class="acts">
       <view class="act {{item.foc?'foc':''}}" ink:for="{{actions}}" ink:key="id" data-id="{{item.id}}" bindtap="onActionTap">{{ item.label }}</view>
@@ -264,7 +348,6 @@ export default {
 
     <text class="debug" ink:if="{{ debug }}">{{ debug }}</text>
     <text class="err" ink:if="{{ errorText }}">{{ errorText }}</text>
-    <text class="dbg">上次按键: {{ lastKey }}</text>
   </view>
 </page>
 
@@ -282,8 +365,8 @@ export default {
 }
 .head { display: flex; flex-direction: column; align-items: center; gap: 1px; }
 .title { font-size: 14px; font-weight: bold; }
-.status { font-size: 10px; color: rgba(64, 255, 94, 0.6); text-align: center; }
-/* 预览正方形(摄像头按 cover 居中裁剪)，九宫格=中央 66%，正好对齐采样区 */
+.status { font-size: 16px; font-weight: bold; color: #40ff5e; text-align: center; }
+/* 复核时画布裁到「框+25%一圈」，框正好=画布中央 2/3，与下面绿网格对齐 */
 .wrap { position: relative; width: 240px; height: 240px; background-color: transparent; }
 .cam {
   width: 240px; height: 240px;
@@ -291,7 +374,7 @@ export default {
   background-color: transparent; /* 不要盖住原生相机层 */
 }
 .guide {
-  position: absolute; top: 41px; left: 41px; width: 158px; height: 158px;
+  position: absolute; top: 40px; left: 40px; width: 160px; height: 160px;
   border: 2px solid #40ff5e;
   display: grid; grid-template-columns: 1fr 1fr 1fr; grid-template-rows: 1fr 1fr 1fr;
 }
@@ -301,6 +384,7 @@ export default {
   font-size: 22px; font-weight: bold; color: #40ff5e;
 }
 .gcell.foc { background-color: rgba(64, 255, 94, 0.85); color: #000; border: 2px solid #40ff5e; }
+.camhint { font-size: 10px; color: rgba(64, 255, 94, 0.7); text-align: center; }
 .acts { display: flex; flex-direction: row; flex-wrap: wrap; gap: 6px; justify-content: center; }
 .act {
   padding: 5px 10px; border: 2px solid #40ff5e; border-radius: 10px;

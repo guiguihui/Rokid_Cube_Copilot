@@ -3,9 +3,14 @@
   "version": "0.1.0",
   "description": "魔方还原助手 — 面向新手的 AIUI 魔方还原教练",
   "main": "app.js",
+  "type": "module",
   "scripts": {
     "start": "jsui start",
-    "dev": "jsui start --debug"
+    "dev": "jsui start --debug",
+    "test": "node --test tests/"
   },
-  "dependencies": {}
+  "devDependencies": {
+    "cstimer_module": "^0.1.5",
+    "cube-solver": "^2.4.1"
+  }
 }
