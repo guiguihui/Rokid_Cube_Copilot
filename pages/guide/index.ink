@@ -7,6 +7,7 @@
 <script setup>
 import wx from 'wx';
 import { parseMoves, stepText } from '../../lib/moves.js';
+import voice from '../../lib/voice.js';
 
 const GREEN = '#40ff5e';
 const DIM = 'rgba(64, 255, 94, 0.6)';
@@ -20,6 +21,7 @@ export default {
     stepLabel: '',   // 文字版指令（无障碍兜底）
     counter: '',
     lastKey: '',
+    voiceHint: '🎤 说「乐奇」后：下一步 / 上一步 / 重复 / 返回',
   },
 
   onLoad() {
@@ -43,12 +45,17 @@ export default {
   onShow() {
     this.render();
     this.speak();
-    if (!this._voiceStarted) { this._voiceStarted = true; this.startVoice(); }
+    // 唤醒词触发：说「乐奇」→ onVoiceWakeup → 听一条命令（每步都可用）
+    voice.use([
+      { phrases: ['下一步', '下一个', '下个', '继续'], run: () => this.next() },
+      { phrases: ['上一步', '上一个', '后退'], run: () => this.prev() },
+      { phrases: ['重复', '再说一遍', '再说'], run: () => this.repeat() },
+      { phrases: ['返回', '退出', '回首页'], run: () => wx.navigateBack({ delta: 1 }) },
+    ], (s) => this.setData({ voiceHint: s === 'listening' ? '🎤 在听…请说命令' : '🎤 说「乐奇」后：下一步 / 上一步 / 重复 / 返回' }));
   },
-
-  onUnload() {
-    if (this.rec) { try { this.rec.abort(); } catch (e) {} this.rec = null; }
-  },
+  onVoiceWakeup() { voice.listen(); },
+  onHide() { voice.pause(); },
+  onUnload() { voice.pause(); },
 
   // ---- 绘制 ----
   render() {
@@ -140,27 +147,6 @@ export default {
     } catch (e) {}
   },
 
-  // ---- 语音命令 ----
-  startVoice() {
-    try {
-      if (typeof SpeechRecognition === 'undefined') return;
-      this.rec = new SpeechRecognition();
-      this.rec.onresult = (e) => {
-        const t = (e && e.results && e.results[0] && e.results[0][0] && e.results[0][0].transcript) || '';
-        this.handleVoice(t);
-      };
-      this.rec.onend = () => { if (this.rec && !this.data.done) { try { this.rec.start(); } catch (e) {} } };
-      this.rec.onerror = () => {};
-      this.rec.start();
-    } catch (e) {}
-  },
-
-  handleVoice(t) {
-    if (/下一?步|下个|继续|next/i.test(t)) this.next();
-    else if (/上一?步|返回|back/i.test(t)) this.prev();
-    else if (/重复|再说|repeat/i.test(t)) this.repeat();
-  },
-
   // ---- 步进 ----
   syncText() {
     this.setData({
@@ -214,7 +200,7 @@ export default {
     // 线性：向前/单击=下一步，向后=上一步
     if (code === 'Enter' || code === 'Space' || code === 'NumpadEnter' || code === 'ArrowRight' || code === 'ArrowDown') this.next();
     else if (code === 'ArrowLeft' || code === 'ArrowUp') this.prev();
-    else if (code === 'Backspace') wx.navigateBack();
+    // 注：Backspace(双击返回) 交给系统弹栈，App 不再 navigateBack（否则多弹一层退出整个程序）
   },
 
   throttleSlide() {
@@ -230,7 +216,8 @@ export default {
   <view class="root">
     <canvas id="hud" width="480" height="210" class="hud"></canvas>
     <text class="fallback">{{ counter }} · {{ stepLabel }}</text>
-    <text class="tip">向前/单击 下一步 · 向后 上一步 · 返回退出 · 也可语音「下一步/上一步」</text>
+    <text class="vhint">{{ voiceHint }}</text>
+    <text class="tip">向前/单击 下一步 · 向后 上一步 · 返回退出</text>
     <text class="dbg">上次按键: {{ lastKey }}</text>
   </view>
 </page>
@@ -259,6 +246,7 @@ export default {
   font-size: 12px;
   color: rgba(64, 255, 94, 0.6);
 }
+.vhint { font-size: 12px; color: #7fd0ff; text-align: center; }
 .dbg {
   font-size: 11px;
   color: rgba(64, 255, 94, 0.45);

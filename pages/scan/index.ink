@@ -12,6 +12,7 @@ import { decodeJpeg, isJpeg } from '../../lib/jpeg.js';
 import { sampleFace, downsample, classifyByAnchorsHue, regionPx, locateCubeLocal, refineRedOrange } from '../../lib/colors.js';
 import { FACE_TO_COLOR, FACE_NAME_CN, COLOR_NAME_CN, nextColor } from '../../lib/cube.js';
 import { loadTestFrame } from '../../lib/testImages.js';
+import voice from '../../lib/voice.js';
 
 const FACES = ['U', 'R', 'F', 'D', 'L', 'B'];
 const SLIDE_COOLDOWN = 250; // 真机滑动太灵敏：冷却时间内的重复滑动只算一次
@@ -23,6 +24,7 @@ const HOLD = {
   L: '橙色面对镜头',
   B: '蓝色面对镜头',
 };
+const SCAN_VHINT = '🎤 说「乐奇」后：拍照 / 测试图片 / 接受 / 重拍 / 上一面 / 退出';
 
 function emptyGuide() {
   return Array.from({ length: 9 }, (_, i) => ({ i, letter: '', foc: false }));
@@ -62,6 +64,7 @@ export default {
     lastKey: '',
     inReview: false,
     camReady: false,
+    voiceHint: SCAN_VHINT,
   },
 
   onLoad() {
@@ -80,11 +83,22 @@ export default {
 
   onShow() {
     if (!this.cam) this.cam = wx.media.createCameraContext();
+    // 唤醒词触发语音：说「乐奇」→ onVoiceWakeup → 听一条命令
+    voice.use([
+      { phrases: ['拍照', '拍', '咔嚓'], run: () => this.captureCam() },
+      { phrases: ['测试图片', '测试'], run: () => this.captureTest() },
+      { phrases: ['上一面', '上一个'], run: () => this.prevFace() },
+      { phrases: ['退出', '返回首页', '回首页'], run: () => this.exitScan() },
+      { phrases: ['接受', '下一面', '确认'], run: () => this.acceptNext() },
+      { phrases: ['重拍', '重来', '再拍'], run: () => this.refreshFace() },
+    ], (s) => this.setData({ voiceHint: s === 'listening' ? '🎤 在听…请说命令' : SCAN_VHINT }));
   },
+  onVoiceWakeup() { voice.listen(); },
 
   onHide() {
     this.cam = null;
     this.setData({ camReady: false });
+    voice.pause();
   },
 
   // 相机初始化完成(bindinitdone)：标记就绪 + 记录时间(用于预热门控)
@@ -308,7 +322,7 @@ export default {
       console.error('[scan] store failed:', e && (e.message || e));
     }
     console.log('[scan] finalize, navigating back');
-    wx.navigateBack();
+    wx.navigateBack({ delta: 1 });
   },
 
   _now() {
@@ -326,7 +340,7 @@ export default {
       if (item === 'capture') this.captureCam();
       else if (item === 'test') this.captureTest();
       else if (item === 'prev') this.prevFace();
-      else if (item === 'exit') wx.navigateBack();
+      else if (item === 'exit') this.exitScan();
     }
   },
 
@@ -351,7 +365,7 @@ export default {
     else if (code === 'ArrowUp' || code === 'ArrowLeft') this.focusPrev();
     else if (code === 'Enter' || code === 'Space' || code === 'NumpadEnter') this.activate();
     else if (code === 'KeyB') this.benchDecode(); // 解码基准热键(adb KEYCODE_B)，不影响正常交互
-    else if (code === 'Backspace') wx.navigateBack();
+    // 注：不再处理 Backspace —— 双击「返回上一级」由系统弹栈，App 再 navigateBack 会多弹一层导致退出整个程序
   },
 
   throttleSlide() {
@@ -359,6 +373,13 @@ export default {
     if (now - (this._lastSlide || 0) < SLIDE_COOLDOWN) return true;
     this._lastSlide = now;
     return false;
+  },
+
+  // 退出扫描回首页：先移除 <camera>(释放 EGL，避免相机活动态阻塞导航)，再 navigateBack
+  exitScan() {
+    console.log('[scan] exit');
+    try { wx.navigateBack({ delta: 1 }); }
+    catch (e) { console.error('[scan] back failed:', e && (e.message || e)); try { wx.reLaunch({ url: '/pages/input/index' }); } catch (e2) {} }
   },
 
   onActionTap(e) {
@@ -394,6 +415,7 @@ export default {
     <view class="acts">
       <view class="act {{item.foc?'foc':''}}" ink:for="{{actions}}" ink:key="id" data-id="{{item.id}}" bindtap="onActionTap">{{ item.label }}</view>
     </view>
+    <text class="vhint">{{ voiceHint }}</text>
 
     <text class="debug" ink:if="{{ debug }}">{{ debug }}</text>
     <text class="err" ink:if="{{ errorText }}">{{ errorText }}</text>
@@ -448,6 +470,7 @@ export default {
 }
 .act.foc { background-color: #40ff5e; color: #000; font-weight: bold; }
 .debug { font-size: 10px; color: rgba(64, 255, 94, 0.7); text-align: center; }
+.vhint { font-size: 11px; color: #7fd0ff; text-align: center; }
 .err { font-size: 11px; color: #ffd6e7; text-align: center; }
 .dbg { font-size: 10px; color: rgba(64, 255, 94, 0.45); }
 </style>

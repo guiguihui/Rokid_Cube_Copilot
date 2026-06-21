@@ -8,17 +8,21 @@
 import wx from 'wx';
 import { solvedGrid, validate, nextColor, COLOR_NAME_CN } from '../../lib/cube.js';
 import { solve, scrambledGrid, warmup, isWarmed } from '../../lib/solver.js';
+import voice from '../../lib/voice.js';
 
 // 硬件只有：向前 / 向后 / 单击 / 双击 -> 单轴线性环形导航
 // 焦点序列：0..3 = 4 个按钮；4..57 = 54 个色块(U R F D L B 各 9)
 // 环形(到尾绕回头)保证每个按钮/色块都能逐个遍历到、不遗漏
-const VERSION = '1.0.42';
+const VERSION = '1.0.49';
 const SLIDE_COOLDOWN = 250; // 真机滑动太灵敏：两次滑动间隔小于此(ms)视为同一次，避免一滑跳多格
 const BTNS = ['scan', 'scramble', 'reset', 'solve'];
 const BTN_LABEL = { scan: '扫描魔方', scramble: '载入测试打乱', reset: '重置', solve: '求解' };
+const VOICE_HINT = '🎤 说「乐奇」唤醒后：扫描魔方 / 载入测试打乱 / 重置 / 求解'; // 唤醒词触发
 const FACE_ORDER = ['U', 'R', 'F', 'D', 'L', 'B']; // 两行各三面：U R F / D L B
 const CELL_BASE = 4;
 const NAV_LEN = CELL_BASE + 54; // 58
+// 中心格(每面 index 4)身份固定、不可改 → 导航直接跳过(不可被选中)
+function isCenterIdx(idx) { return idx >= CELL_BASE && ((idx - CELL_BASE) % 9) === 4; }
 
 export default {
   data: {
@@ -31,6 +35,7 @@ export default {
     lastKey: '',
     version: VERSION,
     warming: false,
+    voiceHint: VOICE_HINT,
   },
 
   onLoad() {
@@ -54,7 +59,16 @@ export default {
 
   onShow() {
     this.applyScannedGrid();
+    // 唤醒词触发的语音命令：说「乐奇」→ onVoiceWakeup → 听一条命令
+    voice.use([
+      { phrases: ['扫描', '扫面', '扫魔方'], run: () => this.goScan() },
+      { phrases: ['打乱', '载入', '测试'], run: () => this.loadScramble() },
+      { phrases: ['重置', '复原', '清空'], run: () => this.resetCube() },
+      { phrases: ['求解', '解魔方', '开始解'], run: () => this.doSolve() },
+    ], (s) => this.setData({ voiceHint: s === 'listening' ? '🎤 在听…请说命令' : VOICE_HINT }));
   },
+  onVoiceWakeup() { voice.listen(); },
+  onHide() { voice.pause(); },
 
   render() {
     const cells = {};
@@ -75,8 +89,8 @@ export default {
     });
   },
 
-  focusNext() { this.focusIndex = (this.focusIndex + 1) % NAV_LEN; this.render(); },
-  focusPrev() { this.focusIndex = (this.focusIndex - 1 + NAV_LEN) % NAV_LEN; this.render(); },
+  focusNext() { do { this.focusIndex = (this.focusIndex + 1) % NAV_LEN; } while (isCenterIdx(this.focusIndex)); this.render(); },
+  focusPrev() { do { this.focusIndex = (this.focusIndex - 1 + NAV_LEN) % NAV_LEN; } while (isCenterIdx(this.focusIndex)); this.render(); },
 
   activate() {
     const idx = this.focusIndex;
@@ -195,7 +209,7 @@ export default {
       <text class="ver">v{{ version }}</text>
     </view>
 
-    <text class="hint">{{ hint }}</text>
+    <text class="vhint">{{ voiceHint }}</text>
     <text class="err" ink:if="{{ status === 'error' }}">{{ errorText }}</text>
     <text class="solving" ink:if="{{ status === 'solving' }}">⏳ 求解中…（首次需初始化求解器，请稍候 1–4 秒）</text>
     <text class="warming" ink:if="{{ warming }}">⏳ 求解器初始化中，稍候即可秒解…</text>
@@ -227,6 +241,7 @@ export default {
       </view>
     </view>
 
+    <text class="hint">{{ hint }}</text>
     <text class="dbg">焦点 {{ focusIndex }}/57 · 上次按键 {{ lastKey }}</text>
   </view>
 </page>
@@ -257,6 +272,7 @@ export default {
 .btn.primary { background-color: rgba(64, 255, 94, 0.18); font-weight: bold; }
 .btn.foc { background-color: #40ff5e; color: #000; font-weight: bold; }
 .hint { font-size: 11px; color: rgba(64, 255, 94, 0.6); text-align: center; }
+.vhint { font-size: 12px; color: #7fd0ff; text-align: center; }
 .err { font-size: 13px; color: #ffd6e7; text-align: center; }
 .solving { font-size: 13px; color: #40ff5e; }
 .warming { font-size: 11px; color: rgba(64, 255, 94, 0.7); text-align: center; }
