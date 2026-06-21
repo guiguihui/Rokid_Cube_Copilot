@@ -120,14 +120,17 @@ export default {
     this.setData({ guideCells, actions, inReview });
   },
 
-  // 复核：裁剪到「采样框 + 周围 25% 一圈」放大到 240×240。
-  // 取 margin=0.25×框边 → 框正好落在画布中央 2/3（与 .guide 绿网格对齐）。
+  // 复核：把「识别区 box + 周围 25% 一圈」裁出来、放大铺满 240×240 画布。
+  // 关键：margin 取 0.25×box.side → box 正好占裁剪图的中央 2/3，
+  //       而屏上 .guide 绿框也是 .wrap 的中央 2/3(CSS top/left=40, 160/240)，
+  //       两者刚好重合 → 你看到的"识别框"就套住了检测到的魔方面。
+  //   ∴ 识别框"看起来多大/套得准不准" = 上面 box(检测区) 的大小位置；屏框本身固定 160px。
   drawReview() {
     if (!this.lastFrame) return;
     const ctx = wx.createCanvasContext('review');
     if (!ctx) return;
     const { rgba, width, height } = this.lastFrame;
-    const box = this.lastLoc || regionPx(width, height);
+    const box = this.lastLoc || regionPx(width, height); // 检测到的识别区(无则退回 SAMPLE_REGION)
     const m = Math.round(box.side * 0.25);
     let cs = box.side + 2 * m;
     let cx0 = box.x0 - m, cy0 = box.y0 - m;
@@ -170,6 +173,11 @@ export default {
     try {
       const photo = await source();
       const { width, height, rgba } = await decodeFrame(photo);
+      // ★★★ 识别框「实际读哪一块、那块多大」就在这里决定 ★★★
+      //  loc = locateFace(...) 自动在帧里找魔方面，返回的框{x0,y0,side}就是识别区；
+      //   它的大小是【自动】的——locateFace 在 lib/colors.js 里按 Lmin~Lmax(0.18~0.45 帧宽) 搜最合适的框。
+      //  若没检测到(loc=null)，退回固定框 regionPx(=lib/colors.js 的 SAMPLE_REGION)。
+      //  注意：这个 region 决定"读哪块"；屏上那个绿框多大是另一回事(见 .guide 的 CSS)。
       const loc = locateFace(rgba, width, height, { yMin: 0.40 }); // 自动检测魔方面(避开上方屏幕)
       const region = loc ? { x0: loc.x0, y0: loc.y0, side: loc.side } : regionPx(width, height);
       const { cells } = sampleFace(rgba, width, height, null, region);
@@ -336,7 +344,7 @@ export default {
     <view class="wrap">
       <camera class="cam" mode="normal" resolution="high" ink:if="{{ !inReview }}" bindinitdone="onCamReady" binderror="onCamError" bindstop="onCamError"></camera>
       <canvas id="review" class="cam" width="240" height="240" ink:if="{{ inReview }}"></canvas>
-      <view class="guide">
+      <view class="guide {{ inReview ? 'review' : 'aim' }}">
         <view class="gcell {{item.foc?'foc':''}}" ink:for="{{guideCells}}" ink:key="i" data-i="{{item.i}}" bindtap="onCellTap"><text>{{ item.letter }}</text></view>
       </view>
     </view>
@@ -373,11 +381,18 @@ export default {
   border-radius: 8px; overflow: hidden;
   background-color: transparent; /* 不要盖住原生相机层 */
 }
+/* ★★★ 两个框的「屏上大小」就在这里 ★★★
+   .guide 是同一个绿色九宫格元素，但按模式套不同尺寸：取景态用 .aim(引导框)，复核态用 .review(识别框)。
+   width/height = 框多大；top/left = 在 .wrap(240×240 预览区) 里的位置。 */
 .guide {
-  position: absolute; top: 40px; left: 40px; width: 160px; height: 160px;
+  position: absolute;
   border: 2px solid #40ff5e;
   display: grid; grid-template-columns: 1fr 1fr 1fr; grid-template-rows: 1fr 1fr 1fr;
 }
+/* 引导框(取景时给你放魔方用)：213px=原 160 放大 33%，居中。只调这里=只调引导框，不影响识别。 */
+.guide.aim { top: 14px; left: 14px; width: 213px; height: 213px; }
+/* 识别框(复核时框住检测到的魔方)：160px 中央 2/3，必须跟 drawReview 的"裁剪到中央2/3"一致，别动。 */
+.guide.review { top: 40px; left: 40px; width: 160px; height: 160px; }
 .gcell {
   display: flex; align-items: center; justify-content: center;
   border: 1px solid rgba(64, 255, 94, 0.9);
