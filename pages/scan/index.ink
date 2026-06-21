@@ -9,7 +9,7 @@ import wx from 'wx';
 import { decodeWebP } from '../../lib/webp.js';
 import { decodePng, isPng } from '../../lib/png.js';
 import { decodeJpeg, isJpeg } from '../../lib/jpeg.js';
-import { sampleFace, downsample, classifyByAnchorsHue, regionPx, locateFace } from '../../lib/colors.js';
+import { sampleFace, downsample, classifyByAnchorsHue, regionPx, locateCubeLocal } from '../../lib/colors.js';
 import { FACE_TO_COLOR, FACE_NAME_CN, COLOR_NAME_CN, nextColor } from '../../lib/cube.js';
 import { loadTestFrame } from '../../lib/testImages.js';
 
@@ -30,11 +30,20 @@ function emptyGuide() {
 function magicHex(b) {
   return [b[0], b[1], b[2], b[3]].map((x) => (x || 0).toString(16).padStart(2, '0')).join(' ');
 }
+// ★解码调优项（页内可调，改这里 adb 导航重载即生效，无需重启 app）★
+//   bypass_filtering: 跳过环内去块滤波(VP8解码大头, ~20-40%)；只平滑块边界，对取平均色判色无影响
+//   no_fancy_upsampling: 跳过花式色度上采样；同理对判色无影响
+const DECODE_OPTS = { bypass_filtering: 1, no_fancy_upsampling: 1 };
+
+// ★解码基准：adb 注入 KEYCODE_B → benchDecode() 纯解码 storage 里那张真机 webp，
+//   读 [webp] 日志的耗时+sig。输入固定 → 公平比耗时 + sig 校验输出不变(=准确率不变)。
+//   完全不碰相机，纯 adb 驱动。
+
 async function decodeFrame(photo) {
   const b = new Uint8Array(photo.data);
   const mt = String(photo.mimeType || '').toLowerCase();
   const isWebp = mt.includes('webp') || (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46);
-  if (isWebp) return await decodeWebP(photo.data);
+  if (isWebp) return await decodeWebP(photo.data, { decodeOpts: DECODE_OPTS });
   if (isPng(b)) return decodePng(b);
   if (isJpeg(b)) return decodeJpeg(b);
   throw new Error('未知格式 mimeType=' + (mt || '?') + ' magic=' + magicHex(b));
@@ -130,7 +139,7 @@ export default {
     const ctx = wx.createCanvasContext('review');
     if (!ctx) return;
     const { rgba, width, height } = this.lastFrame;
-    const box = this.lastLoc || regionPx(width, height); // 检测到的识别区(无则退回 SAMPLE_REGION)
+    const box = this.lastRegion || regionPx(width, height); // 固定识别框(SAMPLE_REGION)
     const m = Math.round(box.side * 0.25);
     let cs = box.side + 2 * m;
     let cx0 = box.x0 - m, cy0 = box.y0 - m;
@@ -171,27 +180,41 @@ export default {
     this.mode = 'busy';
     this.setData({ statusText: label + '识别中…（设备处理可能较慢，请稍候）', errorText: '' });
     try {
-      const photo = await source();
-      const { width, height, rgba } = await decodeFrame(photo);
-      // ★★★ 识别框「实际读哪一块、那块多大」就在这里决定 ★★★
-      //  loc = locateFace(...) 自动在帧里找魔方面，返回的框{x0,y0,side}就是识别区；
-      //   它的大小是【自动】的——locateFace 在 lib/colors.js 里按 Lmin~Lmax(0.18~0.45 帧宽) 搜最合适的框。
-      //  若没检测到(loc=null)，退回固定框 regionPx(=lib/colors.js 的 SAMPLE_REGION)。
-      //  注意：这个 region 决定"读哪块"；屏上那个绿框多大是另一回事(见 .guide 的 CSS)。
-      const loc = locateFace(rgba, width, height, { yMin: 0.40 }); // 自动检测魔方面(避开上方屏幕)
-      const region = loc ? { x0: loc.x0, y0: loc.y0, side: loc.side } : regionPx(width, height);
+      const t0 = this._now();
+      const photo = await source();          // ★实际拍照(takePhoto)
+      const t1 = this._now();
+      // [benchmark] 累积保存每次拍到的真机 webp 帧（frame_0,1,2…），供 PC 提取做定位算法基准。
+      try {
+        const _b0 = new Uint8Array(photo.data);
+        if (_b0[0] === 0x52 && _b0[1] === 0x49 && _b0[2] === 0x46) { // RIFF=webp
+          const _b64 = wx.arrayBufferToBase64(photo.data);
+          let _n = 0; try { _n = wx.getStorageSync('frameCount') || 0; } catch (e) {}
+          wx.setStorageSync('frame_' + _n, _b64);
+          wx.setStorageSync('frameCount', _n + 1);
+          wx.setStorageSync('frameWebpB64', _b64); // 最新帧供解码 bench(KEYCODE_B)用
+          console.log('[dump] frame_' + _n + ' saved bytes=' + photo.data.byteLength);
+        }
+      } catch (_e) { console.log('[dump] err ' + _e); }
+      const { width, height, rgba } = await decodeFrame(photo); // 解码 webp→像素
+      const t2 = this._now();
+      // ★★★ 识别框 = 局部精修检测（locateCubeLocal），测不到回退固定框 ★★★
+      //  魔方就在 SAMPLE_REGION 附近 → 在其周围精修出紧贴方框；不可信则回退固定框。
+      const det = locateCubeLocal(rgba, width, height);
+      const region = det || regionPx(width, height);
       const { cells } = sampleFace(rgba, width, height, null, region);
+      const t3 = this._now();
       this.lastCells = cells;
       this.lastFrame = { rgba, width, height };
       this.lastRegion = region;
-      this.lastLoc = loc;
       this.mode = 'review';
       this._reviewLockUntil = this._now() + 1500; // 复核锁：拍照后 1.5s 内忽略"接受/改色"，防单次确认连带跳过复核
       this.focusIndex = 9; // 默认焦点在「接受本面」
       const c = cells[4];
-      console.log('[scan] loc=' + JSON.stringify(loc) + ' center=' + c.r + ',' + c.g + ',' + c.b);
+      const r0 = (a, b) => Math.round(b - a); // 各步耗时(ms)
+      const timing = `拍照${r0(t0, t1)} 解码${r0(t1, t2)} 采样${r0(t2, t3)} 总${r0(t0, t3)}ms · ${width}x${height}`;
+      console.log('[scan] ' + timing + ' center=' + c.r + ',' + c.g + ',' + c.b);
       this.setData({
-        debug: '',
+        debug: timing, // 把各步毫秒显示在屏上(debug 行)
         statusText: '看框有没有套住魔方',
         errorText: '',
       });
@@ -209,7 +232,9 @@ export default {
     this.doCapture(async () => {
       if (!this.cam) this.cam = wx.media.createCameraContext();
       if (!this.cam) throw new Error('相机不可用');
-      return this.cam.takePhoto({ quality: 'high' });
+      // 顺手探测未文档化的尺寸参数（散弹：哪个被认就缩图，没认就还是480x640，无害）。
+      // 成没成看 [webp] 日志的 WxH。
+      return this.cam.takePhoto({ quality: 'normal', width: 320, height: 240, size: 'low', resolution: 'low' });
     }, '拍照');
   },
 
@@ -217,17 +242,31 @@ export default {
     this.doCapture(() => loadTestFrame(FACES[this.data.faceIdx]), '测试图片');
   },
 
+  // 解码基准（adb 注入 KEYCODE_B 触发）：纯解码烘焙的真机 webp，[webp] 日志给耗时+sig。
+  async benchDecode() {
+    let b64;
+    try { b64 = wx.getStorageSync('frameWebpB64'); } catch (e) {}
+    if (!b64) { console.log('[bench] no frameWebpB64 in storage'); return; }
+    try {
+      const buf = wx.base64ToArrayBuffer(b64);
+      console.log('[bench] start opts=' + JSON.stringify(DECODE_OPTS) + ' bytes=' + buf.byteLength);
+      await decodeWebP(buf, { decodeOpts: DECODE_OPTS }); // 自带 [webp] 计时+sig 日志
+      console.log('[bench] done');
+    } catch (e) { console.log('[bench] err ' + (e && (e.message || e))); }
+  },
+
   cycleCell(i) {
     if (!this.lastCells) return;
     this.lastCells[i].color = nextColor(this.lastCells[i].color);
-    this.lastCells[i].manual = true; // 手动改过的格子，finalize 时不被锚色覆盖
+    this.lastCells[i].manual = true;       // 手动改过的格子，finalize 时不被锚色覆盖
+    this.lastCells[i].confidence = 1.0;    // 人工确认 → 置信度 100%
     this.render();
   },
 
   acceptNext() {
     if (this.mode !== 'review' || !this.lastCells) return;
     const f = FACES[this.data.faceIdx];
-    this.detectedCells[f] = this.lastCells.map((c) => ({ r: c.r, g: c.g, b: c.b, color: c.color, manual: !!c.manual }));
+    this.detectedCells[f] = this.lastCells.map((c) => ({ r: c.r, g: c.g, b: c.b, color: c.color, manual: !!c.manual, confidence: c.manual ? 1.0 : (c.confidence != null ? c.confidence : 0.5) }));
     if (this.data.faceIdx < 5) {
       this.setData({ faceIdx: this.data.faceIdx + 1 });
       this.refreshFace();
@@ -246,11 +285,23 @@ export default {
   finalize() {
     // 相对识别：6 个中心块作锚色，非中心非手动格按最近锚色统一归类
     const anchors = [];
+    let centerCount = 0;
     for (const f of FACES) {
       const c = this.detectedCells[f] && this.detectedCells[f][4];
-      if (c) anchors.push({ color: FACE_TO_COLOR[f], r: c.r, g: c.g, b: c.b });
+      if (c) { anchors.push({ color: FACE_TO_COLOR[f], r: c.r, g: c.g, b: c.b }); centerCount++; }
     }
-    const useAnchors = anchors.length === 6;
+    const useAnchors = centerCount === 6;
+    // 人工确认格(置信度100%)并入锚池，用真实 RGB 帮助判定其它格（尤其同色格）
+    if (useAnchors) {
+      for (const f of FACES) {
+        const cells = this.detectedCells[f] || [];
+        for (let i = 0; i < 9; i++) {
+          if (i === 4) continue;
+          const c = cells[i];
+          if (c && c.manual && c.color) anchors.push({ color: c.color, r: c.r, g: c.g, b: c.b });
+        }
+      }
+    }
     const grid = {};
     for (const f of FACES) {
       const cells = this.detectedCells[f] || [];
@@ -310,6 +361,7 @@ export default {
     if (code === 'ArrowDown' || code === 'ArrowRight') this.focusNext();
     else if (code === 'ArrowUp' || code === 'ArrowLeft') this.focusPrev();
     else if (code === 'Enter' || code === 'Space' || code === 'NumpadEnter') this.activate();
+    else if (code === 'KeyB') this.benchDecode(); // 解码基准热键(adb KEYCODE_B)，不影响正常交互
     else if (code === 'Backspace') wx.navigateBack();
   },
 
@@ -342,7 +394,7 @@ export default {
     </view>
 
     <view class="wrap">
-      <camera class="cam" mode="normal" resolution="high" ink:if="{{ !inReview }}" bindinitdone="onCamReady" binderror="onCamError" bindstop="onCamError"></camera>
+      <camera class="cam" mode="normal" resolution="low" ink:if="{{ !inReview }}" bindinitdone="onCamReady" binderror="onCamError" bindstop="onCamError"></camera>
       <canvas id="review" class="cam" width="240" height="240" ink:if="{{ inReview }}"></canvas>
       <view class="guide {{ inReview ? 'review' : 'aim' }}">
         <view class="gcell {{item.foc?'foc':''}}" ink:for="{{guideCells}}" ink:key="i" data-i="{{item.i}}" bindtap="onCellTap"><text>{{ item.letter }}</text></view>

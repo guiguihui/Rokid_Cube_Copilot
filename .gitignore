@@ -15,3 +15,10 @@ _shot.png
 # CV 原型可视化临时图 + 临时分析脚本
 tools/_*.png
 tools/_*.mjs
+
+# bench: 临时设备 dump / profiler / 派生可视化图（保留 *.webp 基准帧 + *.mjs 脚本）
+tools/bench/storage*.json
+tools/bench/isolate-*.log
+tools/bench/prof.txt
+tools/bench/*.png
+tools/bench/frames/*.png
