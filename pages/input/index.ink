@@ -12,7 +12,7 @@ import { solve, scrambledGrid, warmup, isWarmed } from '../../lib/solver.js';
 // 硬件只有：向前 / 向后 / 单击 / 双击 -> 单轴线性环形导航
 // 焦点序列：0..3 = 4 个按钮；4..57 = 54 个色块(U R F D L B 各 9)
 // 环形(到尾绕回头)保证每个按钮/色块都能逐个遍历到、不遗漏
-const VERSION = '1.0.38';
+const VERSION = '1.0.42';
 const SLIDE_COOLDOWN = 250; // 真机滑动太灵敏：两次滑动间隔小于此(ms)视为同一次，避免一滑跳多格
 const BTNS = ['scan', 'scramble', 'reset', 'solve'];
 const BTN_LABEL = { scan: '扫描魔方', scramble: '载入测试打乱', reset: '重置', solve: '求解' };
@@ -38,7 +38,7 @@ export default {
     this.focusIndex = 0;
     this.render();
     this.applyScannedGrid();
-    this.scheduleWarmup();
+    // this.scheduleWarmup(); // 已关闭：进入首页不再预热求解器（用户要求）
   },
 
   // 首屏画完后延迟预热求解器：建表卡顿挪到用户看首页/扫描时，之后求解秒出

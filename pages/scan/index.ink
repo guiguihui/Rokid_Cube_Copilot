@@ -9,7 +9,7 @@ import wx from 'wx';
 import { decodeWebP } from '../../lib/webp.js';
 import { decodePng, isPng } from '../../lib/png.js';
 import { decodeJpeg, isJpeg } from '../../lib/jpeg.js';
-import { sampleFace, downsample, classifyByAnchorsHue, regionPx, locateCubeLocal } from '../../lib/colors.js';
+import { sampleFace, downsample, classifyByAnchorsHue, regionPx, locateCubeLocal, refineRedOrange } from '../../lib/colors.js';
 import { FACE_TO_COLOR, FACE_NAME_CN, COLOR_NAME_CN, nextColor } from '../../lib/cube.js';
 import { loadTestFrame } from '../../lib/testImages.js';
 
@@ -202,6 +202,11 @@ export default {
       const det = locateCubeLocal(rgba, width, height);
       const region = det || regionPx(width, height);
       const { cells } = sampleFace(rgba, width, height, null, region);
+      // 同面内细分红/橙（用已扫到的红面(R)/橙面(L)中心作参照，缺则用默认参照）
+      const _fc = FACE_TO_COLOR[FACES[this.data.faceIdx]];
+      const _redRef = (this.detectedCells.R && this.detectedCells.R[4]) || (_fc === 'R' ? cells[4] : null);
+      const _orgRef = (this.detectedCells.L && this.detectedCells.L[4]) || (_fc === 'O' ? cells[4] : null);
+      refineRedOrange(cells, _redRef, _orgRef);
       const t3 = this._now();
       this.lastCells = cells;
       this.lastFrame = { rgba, width, height };
@@ -283,25 +288,9 @@ export default {
   },
 
   finalize() {
-    // 相对识别：6 个中心块作锚色，非中心非手动格按最近锚色统一归类
-    const anchors = [];
-    let centerCount = 0;
-    for (const f of FACES) {
-      const c = this.detectedCells[f] && this.detectedCells[f][4];
-      if (c) { anchors.push({ color: FACE_TO_COLOR[f], r: c.r, g: c.g, b: c.b }); centerCount++; }
-    }
-    const useAnchors = centerCount === 6;
-    // 人工确认格(置信度100%)并入锚池，用真实 RGB 帮助判定其它格（尤其同色格）
-    if (useAnchors) {
-      for (const f of FACES) {
-        const cells = this.detectedCells[f] || [];
-        for (let i = 0; i < 9; i++) {
-          if (i === 4) continue;
-          const c = cells[i];
-          if (c && c.manual && c.color) anchors.push({ color: c.color, r: c.r, g: c.g, b: c.b });
-        }
-      }
-    }
+    // ★WYSIWYG★：首页就用复核时「你看到并接受」的颜色（含你的手动改色），不再二次重判
+    //   —— 之前 finalize 用锚色重分类会覆盖你已确认的复核结果，导致"改了首页还是错"。
+    //   每面判色已在复核时完成(classifyColor + refineRedOrange 细分红橙)，这里直接采用。
     const grid = {};
     for (const f of FACES) {
       const cells = this.detectedCells[f] || [];
@@ -309,8 +298,7 @@ export default {
       for (let i = 0; i < 9; i++) {
         if (i === 4) { arr.push(FACE_TO_COLOR[f]); continue; } // 中心强制身份色
         const c = cells[i];
-        if (!c) { arr.push(''); continue; }
-        arr.push(c.manual || !useAnchors ? c.color : classifyByAnchorsHue(c, anchors));
+        arr.push(c ? c.color : '');
       }
       grid[f] = arr;
     }
@@ -344,11 +332,12 @@ export default {
 
   focusNext() {
     const n = this.items().length;
-    this.focusIndex = Math.min(n - 1, this.focusIndex + 1);
+    this.focusIndex = (this.focusIndex + 1) % n;       // 环形：到尾绕回头
     this.render();
   },
   focusPrev() {
-    this.focusIndex = Math.max(0, this.focusIndex - 1);
+    const n = this.items().length;
+    this.focusIndex = (this.focusIndex - 1 + n) % n;   // 环形：到头绕回尾(从首格可回到「接受/重拍」)
     this.render();
   },
 
