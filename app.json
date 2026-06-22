@@ -1,5 +1,6 @@
 {
   "pages": [
+    "pages/entry/index",
     "pages/input/index",
     "pages/scan/index",
     "pages/guide/index"

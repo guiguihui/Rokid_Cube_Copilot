@@ -20,7 +20,6 @@ export default {
     done: false,
     stepLabel: '',   // 文字版指令（无障碍兜底）
     counter: '',
-    lastKey: '',
     voiceHint: '🎤 说「乐奇」后：下一步 / 上一步 / 重复 / 返回',
   },
 
@@ -194,7 +193,6 @@ export default {
   onKeyDown(event) {
     if (!event) return;
     const code = event.code;
-    this.setData({ lastKey: code || '' });
     const isSlide = code === 'ArrowRight' || code === 'ArrowDown' || code === 'ArrowLeft' || code === 'ArrowUp';
     if (isSlide && this.throttleSlide()) return; // 滑动节流：一次滑动只走一步
     // 线性：向前/单击=下一步，向后=上一步
@@ -216,9 +214,9 @@ export default {
   <view class="root">
     <canvas id="hud" width="480" height="210" class="hud"></canvas>
     <text class="fallback">{{ counter }} · {{ stepLabel }}</text>
+    <text class="howto" ink:if="{{ !done }}">把要转的那一面转到正对你，然后按指示转动魔方</text>
     <text class="vhint">{{ voiceHint }}</text>
     <text class="tip">向前/单击 下一步 · 向后 上一步 · 返回退出</text>
-    <text class="dbg">上次按键: {{ lastKey }}</text>
   </view>
 </page>
 
@@ -246,9 +244,6 @@ export default {
   font-size: 12px;
   color: rgba(64, 255, 94, 0.6);
 }
+.howto { font-size: 13px; color: #40ff5e; text-align: center; line-height: 17px; }
 .vhint { font-size: 12px; color: #7fd0ff; text-align: center; }
-.dbg {
-  font-size: 11px;
-  color: rgba(64, 255, 94, 0.45);
-}
 </style>

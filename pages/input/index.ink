@@ -13,7 +13,7 @@ import voice from '../../lib/voice.js';
 // 硬件只有：向前 / 向后 / 单击 / 双击 -> 单轴线性环形导航
 // 焦点序列：0..3 = 4 个按钮；4..57 = 54 个色块(U R F D L B 各 9)
 // 环形(到尾绕回头)保证每个按钮/色块都能逐个遍历到、不遗漏
-const VERSION = '1.0.49';
+const VERSION = '1.0.53';
 const SLIDE_COOLDOWN = 250; // 真机滑动太灵敏：两次滑动间隔小于此(ms)视为同一次，避免一滑跳多格
 const BTNS = ['scan', 'scramble', 'reset', 'solve'];
 const BTN_LABEL = { scan: '扫描魔方', scramble: '载入测试打乱', reset: '重置', solve: '求解' };
@@ -32,7 +32,6 @@ export default {
     status: 'idle',
     errorText: '',
     hint: '向前/向后 选择，单击 确认/切换颜色（环形遍历，可改任意色块）。',
-    lastKey: '',
     version: VERSION,
     warming: false,
     voiceHint: VOICE_HINT,
@@ -171,7 +170,6 @@ export default {
 
   onKeyDown(event) {
     const code = event && event.code;
-    this.setData({ lastKey: code || '' });
     const isSlide = code === 'ArrowDown' || code === 'ArrowRight' || code === 'ArrowUp' || code === 'ArrowLeft';
     if (isSlide && this.throttleSlide()) return; // 滑动节流：一次滑动只走一格
     if (code === 'ArrowDown' || code === 'ArrowRight') this.focusNext();
@@ -242,7 +240,6 @@ export default {
     </view>
 
     <text class="hint">{{ hint }}</text>
-    <text class="dbg">焦点 {{ focusIndex }}/57 · 上次按键 {{ lastKey }}</text>
   </view>
 </page>
 
@@ -302,5 +299,4 @@ export default {
 }
 .cell.lock { color: rgba(64, 255, 94, 0.55); border-color: rgba(64, 255, 94, 0.25); }
 .cell.foc { background-color: #40ff5e; color: #000; border: 2px solid #40ff5e; }
-.dbg { font-size: 10px; color: rgba(64, 255, 94, 0.45); }
 </style>

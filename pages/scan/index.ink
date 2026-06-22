@@ -11,20 +11,21 @@ import { decodePng, isPng } from '../../lib/png.js';
 import { decodeJpeg, isJpeg } from '../../lib/jpeg.js';
 import { sampleFace, downsample, classifyByAnchorsHue, regionPx, locateCubeLocal, refineRedOrange } from '../../lib/colors.js';
 import { FACE_TO_COLOR, FACE_NAME_CN, COLOR_NAME_CN, nextColor } from '../../lib/cube.js';
-import { loadTestFrame } from '../../lib/testImages.js';
 import voice from '../../lib/voice.js';
 
 const FACES = ['U', 'R', 'F', 'D', 'L', 'B'];
 const SLIDE_COOLDOWN = 250; // 真机滑动太灵敏：冷却时间内的重复滑动只算一次
+// 每面唯一正确朝向(行优先采样无镜像 + facelet 直接拼接 → 朝向错=颜色对但无法还原)：
+//   4 个侧面全程白色在上、转动对准镜头；顶/底两面记"朝上的边"(顶=蓝边上、底=绿边上)。
 const HOLD = {
-  U: '白色面朝上，俯视拍',
-  R: '红色面对镜头',
-  F: '绿色面对镜头',
-  D: '黄色面朝上，仰视拍',
-  L: '橙色面对镜头',
-  B: '蓝色面对镜头',
+  U: '白色面对镜头，蓝色边朝上',
+  R: '红色面对镜头，白色在上',
+  F: '绿色面对镜头，白色在上',
+  D: '黄色面对镜头，绿色边朝上',
+  L: '橙色面对镜头，白色在上',
+  B: '蓝色面对镜头，白色在上',
 };
-const SCAN_VHINT = '🎤 说「乐奇」后：拍照 / 测试图片 / 接受 / 重拍 / 上一面 / 退出';
+const SCAN_VHINT = '🎤 说「乐奇」后：拍照 / 接受 / 重拍 / 上一面 / 退出';
 
 function emptyGuide() {
   return Array.from({ length: 9 }, (_, i) => ({ i, letter: '', foc: false }));
@@ -36,10 +37,6 @@ function magicHex(b) {
 //   bypass_filtering: 跳过环内去块滤波(VP8解码大头, ~20-40%)；只平滑块边界，对取平均色判色无影响
 //   no_fancy_upsampling: 跳过花式色度上采样；同理对判色无影响
 const DECODE_OPTS = { bypass_filtering: 1, no_fancy_upsampling: 1 };
-
-// ★解码基准：adb 注入 KEYCODE_B → benchDecode() 纯解码 storage 里那张真机 webp，
-//   读 [webp] 日志的耗时+sig。输入固定 → 公平比耗时 + sig 校验输出不变(=准确率不变)。
-//   完全不碰相机，纯 adb 驱动。
 
 async function decodeFrame(photo) {
   const b = new Uint8Array(photo.data);
@@ -57,11 +54,9 @@ export default {
     faceName: '',
     holdHint: '',
     statusText: '',
-    debug: '',
     errorText: '',
     guideCells: emptyGuide(),
     actions: [],
-    lastKey: '',
     inReview: false,
     camReady: false,
     voiceHint: SCAN_VHINT,
@@ -86,7 +81,6 @@ export default {
     // 唤醒词触发语音：说「乐奇」→ onVoiceWakeup → 听一条命令
     voice.use([
       { phrases: ['拍照', '拍', '咔嚓'], run: () => this.captureCam() },
-      { phrases: ['测试图片', '测试'], run: () => this.captureTest() },
       { phrases: ['上一面', '上一个'], run: () => this.prevFace() },
       { phrases: ['退出', '返回首页', '回首页'], run: () => this.exitScan() },
       { phrases: ['接受', '下一面', '确认'], run: () => this.acceptNext() },
@@ -114,7 +108,7 @@ export default {
   items() {
     if (this.mode === 'review') return [0, 1, 2, 3, 4, 5, 6, 7, 8, 'accept', 'retake'];
     // aim
-    return this.data.faceIdx > 0 ? ['capture', 'test', 'prev', 'exit'] : ['capture', 'test', 'exit'];
+    return this.data.faceIdx > 0 ? ['capture', 'prev', 'exit'] : ['capture', 'exit'];
   },
 
   render() {
@@ -136,7 +130,7 @@ export default {
     } else {
       actions = items.map((id) => ({
         id,
-        label: id === 'capture' ? '拍照' : id === 'test' ? '测试图片' : id === 'prev' ? '上一面' : '退出',
+        label: id === 'capture' ? '拍照' : id === 'prev' ? '上一面' : '退出',
         foc: items[this.focusIndex] === id,
       }));
     }
@@ -183,7 +177,6 @@ export default {
       faceName: FACE_NAME_CN[f],
       holdHint: HOLD[f],
       statusText: `第 ${this.data.faceIdx + 1}/6 面：举魔方对镜头 →「拍照」`,
-      debug: '',
       errorText: '',
     });
     this.render();
@@ -197,18 +190,6 @@ export default {
       const t0 = this._now();
       const photo = await source();          // ★实际拍照(takePhoto)
       const t1 = this._now();
-      // [benchmark] 累积保存每次拍到的真机 webp 帧（frame_0,1,2…），供 PC 提取做定位算法基准。
-      try {
-        const _b0 = new Uint8Array(photo.data);
-        if (_b0[0] === 0x52 && _b0[1] === 0x49 && _b0[2] === 0x46) { // RIFF=webp
-          const _b64 = wx.arrayBufferToBase64(photo.data);
-          let _n = 0; try { _n = wx.getStorageSync('frameCount') || 0; } catch (e) {}
-          wx.setStorageSync('frame_' + _n, _b64);
-          wx.setStorageSync('frameCount', _n + 1);
-          wx.setStorageSync('frameWebpB64', _b64); // 最新帧供解码 bench(KEYCODE_B)用
-          console.log('[dump] frame_' + _n + ' saved bytes=' + photo.data.byteLength);
-        }
-      } catch (_e) { console.log('[dump] err ' + _e); }
       const { width, height, rgba } = await decodeFrame(photo); // 解码 webp→像素
       const t2 = this._now();
       // ★★★ 识别框 = 局部精修检测（locateCubeLocal），测不到回退固定框 ★★★
@@ -233,7 +214,6 @@ export default {
       const timing = `拍照${r0(t0, t1)} 解码${r0(t1, t2)} 采样${r0(t2, t3)} 总${r0(t0, t3)}ms · ${width}x${height}`;
       console.log('[scan] ' + timing + ' center=' + c.r + ',' + c.g + ',' + c.b);
       this.setData({
-        debug: timing, // 把各步毫秒显示在屏上(debug 行)
         statusText: '看框有没有套住魔方',
         errorText: '',
       });
@@ -242,7 +222,7 @@ export default {
     } catch (e) {
       this.mode = 'aim';
       console.error('[scan] capture failed:', e && (e.message || e));
-      this.setData({ statusText: '对准引导框，单击「拍照」或「测试图片」', errorText: '失败：' + (e && (e.message || e)) });
+      this.setData({ statusText: '对准引导框，单击「拍照」', errorText: '失败：' + (e && (e.message || e)) });
       this.render();
     }
   },
@@ -255,23 +235,6 @@ export default {
       // 成没成看 [webp] 日志的 WxH。
       return this.cam.takePhoto({ quality: 'normal', width: 320, height: 240, size: 'low', resolution: 'low' });
     }, '拍照');
-  },
-
-  captureTest() {
-    this.doCapture(() => loadTestFrame(FACES[this.data.faceIdx]), '测试图片');
-  },
-
-  // 解码基准（adb 注入 KEYCODE_B 触发）：纯解码烘焙的真机 webp，[webp] 日志给耗时+sig。
-  async benchDecode() {
-    let b64;
-    try { b64 = wx.getStorageSync('frameWebpB64'); } catch (e) {}
-    if (!b64) { console.log('[bench] no frameWebpB64 in storage'); return; }
-    try {
-      const buf = wx.base64ToArrayBuffer(b64);
-      console.log('[bench] start opts=' + JSON.stringify(DECODE_OPTS) + ' bytes=' + buf.byteLength);
-      await decodeWebP(buf, { decodeOpts: DECODE_OPTS }); // 自带 [webp] 计时+sig 日志
-      console.log('[bench] done');
-    } catch (e) { console.log('[bench] err ' + (e && (e.message || e))); }
   },
 
   cycleCell(i) {
@@ -338,7 +301,6 @@ export default {
       else if (item === 'retake') this.refreshFace();
     } else if (this.mode === 'aim') {
       if (item === 'capture') this.captureCam();
-      else if (item === 'test') this.captureTest();
       else if (item === 'prev') this.prevFace();
       else if (item === 'exit') this.exitScan();
     }
@@ -357,14 +319,12 @@ export default {
 
   onKeyDown(event) {
     const code = event && event.code;
-    this.setData({ lastKey: code || '' });
     if (this.mode === 'busy') return;
     const isSlide = code === 'ArrowDown' || code === 'ArrowRight' || code === 'ArrowUp' || code === 'ArrowLeft';
     if (isSlide && this.throttleSlide()) return; // 滑动节流：一次滑动只走一格
     if (code === 'ArrowDown' || code === 'ArrowRight') this.focusNext();
     else if (code === 'ArrowUp' || code === 'ArrowLeft') this.focusPrev();
     else if (code === 'Enter' || code === 'Space' || code === 'NumpadEnter') this.activate();
-    else if (code === 'KeyB') this.benchDecode(); // 解码基准热键(adb KEYCODE_B)，不影响正常交互
     // 注：不再处理 Backspace —— 双击「返回上一级」由系统弹栈，App 再 navigateBack 会多弹一层导致退出整个程序
   },
 
@@ -379,7 +339,7 @@ export default {
   exitScan() {
     console.log('[scan] exit');
     try { wx.navigateBack({ delta: 1 }); }
-    catch (e) { console.error('[scan] back failed:', e && (e.message || e)); try { wx.reLaunch({ url: '/pages/input/index' }); } catch (e2) {} }
+    catch (e) { console.error('[scan] back failed:', e && (e.message || e)); try { wx.redirectTo({ url: '/pages/input/index' }); } catch (e2) {} }
   },
 
   onActionTap(e) {
@@ -417,7 +377,6 @@ export default {
     </view>
     <text class="vhint">{{ voiceHint }}</text>
 
-    <text class="debug" ink:if="{{ debug }}">{{ debug }}</text>
     <text class="err" ink:if="{{ errorText }}">{{ errorText }}</text>
   </view>
 </page>
@@ -469,8 +428,6 @@ export default {
   color: #40ff5e; font-size: 12px;
 }
 .act.foc { background-color: #40ff5e; color: #000; font-weight: bold; }
-.debug { font-size: 10px; color: rgba(64, 255, 94, 0.7); text-align: center; }
 .vhint { font-size: 11px; color: #7fd0ff; text-align: center; }
 .err { font-size: 11px; color: #ffd6e7; text-align: center; }
-.dbg { font-size: 10px; color: rgba(64, 255, 94, 0.45); }
 </style>
